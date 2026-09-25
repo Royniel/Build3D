@@ -1,0 +1,116 @@
+name: build3d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-build3d}
+      POSTGRES_USER: ${POSTGRES_USER:-build3d}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-build3d}
+    ports:
+      # Exposed so you can psql / run the test suite from the host. Defaults
+      # to 5433 on the host so it does not collide with a Postgres you may
+      # already have installed locally on 5432. Inside the compose network
+      # the other services still reach it on 5432.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # depends_on: service_healthy below waits on this, so Django never
+      # starts migrating against a database that is not accepting connections.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-build3d} -d ${POSTGRES_DB:-build3d}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  quoting:
+    build: ./quoting_service
+    # --reload plus the bind mount below means editing app/*.py on your
+    # machine restarts the server in the container. Dev convenience only;
+    # the image's own CMD (no --reload) is what you would ship.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Source is mounted rather than only baked in, so code changes take
+      # effect without `docker compose build`.
+      - ./quoting_service:/app
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  django:
+    build: ./django_service
+    # Migrate, seed, then serve. Doing it in the command (rather than baking it
+    # into the image) keeps the image environment-agnostic.
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             python manage.py seed &&
+             python manage.py runserver 0.0.0.0:8000"
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-only-insecure-secret-key}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-True}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,0.0.0.0,django}
+      POSTGRES_DB: ${POSTGRES_DB:-build3d}
+      POSTGRES_USER: ${POSTGRES_USER:-build3d}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-build3d}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      # Service-to-service DNS: "quoting" is the compose service name.
+      QUOTING_SERVICE_URL: http://quoting:8001
+      QUOTING_SERVICE_TIMEOUT: ${QUOTING_SERVICE_TIMEOUT:-3.0}
+      DJANGO_SUPERUSER_USERNAME: ${DJANGO_SUPERUSER_USERNAME:-admin}
+      DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-admin-pass-12345}
+      DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-admin@example.com}
+    volumes:
+      # Mount the source so runserver's autoreloader picks up your edits and
+      # new management commands appear without rebuilding the image.
+      - ./django_service:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      quoting:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    # Dev server for hot reload, matching the other two services.
+    command: ["npm", "run", "dev"]
+    environment:
+      # Server-side only. The browser never sees these -- it talks to Next.js,
+      # which talks to the backends over the private compose network. That is
+      # why there is no CORS configuration anywhere in this project.
+      DJANGO_INTERNAL_URL: http://django:8000
+      QUOTING_INTERNAL_URL: http://quoting:8001
+      NODE_ENV: development
+      # Docker Desktop on macOS/Windows does not propagate inotify events
+      # across a bind mount, so Next's watcher never sees your edits and
+      # silently serves a stale compilation. Polling costs a little CPU and
+      # makes hot reload actually work. (Django's StatReloader already polls,
+      # which is why that service reloaded fine without this.)
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app
+      # Anonymous volumes so the container's own node_modules and .next are
+      # not shadowed by whatever is on the host (different platform, possibly
+      # absent). Without these, the bind mount above hides the installed deps.
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      django:
+        condition: service_started
+      quoting:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

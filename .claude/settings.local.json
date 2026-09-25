@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(ls \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" 2>&1 | head -2; echo \"---\"; ls /Applications | grep -i -E \"chrome|chromium|edge\" 2>&1)",
+      "Read(//Applications/Google Chrome.app/Contents/MacOS/**)",
+      "Read(//Applications/**)",
+      "Bash(mkdir -p /private/tmp/claude-501/-Users-nielroy-Documents-Projects-Build3D/d6bf92d6-98ff-4fa4-916b-bfd80aa09134/scratchpad/shot)",
+      "Bash(npm init *)",
+      "Bash(echo \"installed: $?\")"
+    ]
+  }
+}
